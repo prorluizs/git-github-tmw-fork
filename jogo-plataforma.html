@@ -1,0 +1,652 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<!-- Viewport configurado para celular: impede zoom e ajuste de escala pelo usuário -->
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, minimum-scale=1.0, user-scalable=no, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<title>Sobrevivente - Plataforma 2D</title>
+<style>
+  /* ============================================================
+     ESTILO GERAL
+     Reset básico + travas para impedir scroll/zoom no celular
+     ============================================================ */
+  * {
+    margin: 0;
+    padding: 0;
+    box-sizing: border-box;
+    /* Impede o destaque azul ao tocar e a seleção de texto */
+    -webkit-tap-highlight-color: transparent;
+    -webkit-user-select: none;
+    user-select: none;
+    -webkit-touch-callout: none;
+  }
+
+  html, body {
+    width: 100%;
+    height: 100%;
+    overflow: hidden;            /* Sem scroll */
+    background: #0a0a14;          /* Fundo escuro (azul bem escuro) */
+    /* Impede gestos de scroll/zoom por toque no corpo da página */
+    touch-action: none;
+    overscroll-behavior: none;
+    position: fixed;
+    font-family: monospace;
+  }
+
+  /* Container que centraliza o canvas */
+  #containerJogo {
+    position: relative;
+    width: 100%;
+    height: 100%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+
+  /* O canvas ocupa a tela toda; o desenho interno usa coordenadas próprias */
+  canvas {
+    display: block;
+    width: 100%;
+    height: 100%;
+    /* Renderização "pixelada" (sem suavização) para combinar com pixel art */
+    image-rendering: pixelated;
+    image-rendering: crisp-edges;
+    touch-action: none;
+  }
+
+  /* ============================================================
+     CONTROLES DE TOQUE NA TELA
+     Sobrepostos ao canvas. Lado esquerdo = direção, direito = ações.
+     ============================================================ */
+  #controles {
+    position: absolute;
+    inset: 0;                    /* Cobre toda a tela */
+    pointer-events: none;        /* Só os botões capturam toque */
+    z-index: 10;
+  }
+
+  .botao {
+    position: absolute;
+    bottom: 24px;
+    width: 78px;
+    height: 78px;
+    border-radius: 50%;
+    background: rgba(60, 70, 110, 0.35);
+    border: 2px solid rgba(150, 170, 230, 0.5);
+    color: rgba(220, 230, 255, 0.9);
+    font-size: 30px;
+    font-weight: bold;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    pointer-events: auto;        /* Captura o toque */
+    touch-action: none;
+    user-select: none;
+  }
+
+  /* Feedback visual ao pressionar (controlado por classe via JS) */
+  .botao.ativo {
+    background: rgba(120, 140, 220, 0.55);
+    transform: scale(0.92);
+  }
+
+  /* Posições dos botões */
+  #btnEsquerda { left: 20px; }
+  #btnDireita  { left: 110px; }
+  #btnPular    { right: 110px; background: rgba(60, 110, 90, 0.35); border-color: rgba(120, 230, 170, 0.5); }
+  #btnAtacar   { right: 20px;  background: rgba(120, 60, 70, 0.35);  border-color: rgba(230, 130, 140, 0.5); }
+
+  /* Texto de ajuda no topo (some após alguns segundos) */
+  #ajuda {
+    position: absolute;
+    top: 10px;
+    left: 50%;
+    transform: translateX(-50%);
+    color: rgba(180, 195, 235, 0.7);
+    font-size: 12px;
+    text-align: center;
+    z-index: 11;
+    pointer-events: none;
+    transition: opacity 1s;
+    line-height: 1.5;
+  }
+</style>
+</head>
+<body>
+  <div id="containerJogo">
+    <canvas id="tela"></canvas>
+
+    <!-- Sobreposição com os botões de toque -->
+    <div id="controles">
+      <div id="btnEsquerda" class="botao">◀</div>
+      <div id="btnDireita"  class="botao">▶</div>
+      <div id="btnPular"    class="botao">⤒</div>
+      <div id="btnAtacar"   class="botao">✦</div>
+    </div>
+
+    <div id="ajuda">Toque nos botões para jogar<br>No PC: ← → para mover, Z pular, X atacar</div>
+  </div>
+
+<script>
+"use strict";
+/* ================================================================
+   JOGO DE PLATAFORMA 2D - ARQUIVO ÚNICO
+   ----------------------------------------------------------------
+   Organização do código:
+     1. Configuração do canvas e resolução virtual
+     2. Constantes do mundo (física, cores, etc.)
+     3. Definição do nível (chão e plataformas)
+     4. Objeto do jogador (estado, física, ataque)
+     5. Entrada: teclado + toque (multitoque)
+     6. Atualização da lógica (update)
+     7. Desenho na tela (render) - tudo com retângulos
+     8. Game loop com requestAnimationFrame
+
+   PARA TROCAR POR SPRITES DEPOIS:
+     - Procure os blocos marcados com "[SPRITE]". É onde os
+       retângulos placeholder são desenhados. Basta substituir o
+       fillRect por ctx.drawImage(imagem, ...) usando o estado do
+       jogador (parado/andando/pulando/atacando e direção).
+   ================================================================ */
+
+  // ----------------------------------------------------------------
+  // 1. CANVAS E RESOLUÇÃO VIRTUAL
+  // ----------------------------------------------------------------
+  // Usamos uma resolução de "mundo" fixa e escalamos para a tela.
+  // Assim a física é estável independente do tamanho do celular.
+  const canvas = document.getElementById("tela");
+  const ctx = canvas.getContext("2d");
+
+  // Resolução virtual do jogo (largura x altura do "mundo visível")
+  const LARGURA_VIRTUAL = 480;
+  const ALTURA_VIRTUAL = 270;   // proporção 16:9
+
+  // Ajusta o tamanho real do canvas para a tela, mantendo a proporção.
+  function ajustarCanvas() {
+    const larguraTela = window.innerWidth;
+    const alturaTela = window.innerHeight;
+
+    // Escala que cabe na tela mantendo proporção 16:9
+    const escala = Math.min(larguraTela / LARGURA_VIRTUAL, alturaTela / ALTURA_VIRTUAL);
+
+    // Resolução interna do canvas = resolução virtual (desenho nítido em pixel art)
+    canvas.width = LARGURA_VIRTUAL;
+    canvas.height = ALTURA_VIRTUAL;
+
+    // Tamanho exibido (CSS) = virtual * escala, centralizado pelo flex do container
+    canvas.style.width = (LARGURA_VIRTUAL * escala) + "px";
+    canvas.style.height = (ALTURA_VIRTUAL * escala) + "px";
+
+    // Desativa suavização para manter o estilo pixelado
+    ctx.imageSmoothingEnabled = false;
+  }
+  window.addEventListener("resize", ajustarCanvas);
+  window.addEventListener("orientationchange", ajustarCanvas);
+  ajustarCanvas();
+
+  // ----------------------------------------------------------------
+  // 2. CONSTANTES DO MUNDO (FÍSICA E CORES)
+  // ----------------------------------------------------------------
+  const GRAVIDADE = 0.6;          // aceleração para baixo por quadro
+  const VELOCIDADE_ANDAR = 2.6;   // velocidade horizontal
+  const FORCA_PULO = 11;          // impulso vertical ao pular
+  const ATRITO = 0.8;             // desaceleração horizontal quando solto
+
+  // Paleta pós-apocalíptica (tons de azul e vermelho, fundo escuro)
+  const CORES = {
+    ceuTopo:    "#10101e",  // azul-noite bem escuro (topo do fundo)
+    ceuBaixo:   "#2a1018",  // vermelho-escuro (poeira/horizonte)
+    lua:        "#7a3340",  // lua avermelhada
+    montanhas:  "#161628",  // silhuetas ao fundo
+    ruinas:     "#1d1d33",  // prédios/ruínas distantes
+    chao:       "#242440",  // chão (azul acinzentado)
+    chaoTopo:   "#3a3a66",  // borda superior do chão
+    plataforma: "#33334d",  // plataformas
+    platTopo:   "#55556e",  // borda superior das plataformas
+    jogador:    "#c0455a",  // corpo do herói (vermelho)
+    jogadorPele:"#d98f7a",  // detalhe (pele/cabeça)
+    jogadorAzul:"#4a6aa8",  // detalhe (roupa azul)
+    ataque:     "rgba(230, 200, 120, 0.85)" // brilho do golpe
+  };
+
+  // ----------------------------------------------------------------
+  // 3. DEFINIÇÃO DO NÍVEL
+  // ----------------------------------------------------------------
+  // O chão e cada plataforma são retângulos sólidos com colisão.
+  const ALTURA_CHAO = 40; // altura da faixa de chão no rodapé
+
+  // Retângulo do chão (ocupa toda a largura na base)
+  const chao = {
+    x: 0,
+    y: ALTURA_VIRTUAL - ALTURA_CHAO,
+    largura: LARGURA_VIRTUAL,
+    altura: ALTURA_CHAO
+  };
+
+  // Plataformas flutuantes (x, y, largura, altura)
+  const plataformas = [
+    { x: 60,  y: 200, largura: 90, altura: 14 },
+    { x: 200, y: 165, largura: 80, altura: 14 },
+    { x: 330, y: 130, largura: 90, altura: 14 },
+    { x: 150, y: 110, largura: 60, altura: 14 }
+  ];
+
+  // Lista com todos os sólidos para checagem de colisão (chão + plataformas)
+  const solidos = [chao].concat(plataformas);
+
+  // ----------------------------------------------------------------
+  // 4. JOGADOR
+  // ----------------------------------------------------------------
+  const jogador = {
+    x: 40,
+    y: 100,
+    largura: 18,
+    altura: 28,
+    velX: 0,
+    velY: 0,
+    noChao: false,
+    direcao: 1,          // 1 = direita, -1 = esquerda
+
+    // Estado visual: "parado", "andando", "pulando", "atacando"
+    estado: "parado",
+
+    // Controle do ataque
+    atacando: false,
+    tempoAtaque: 0,      // quadros restantes da animação de ataque
+    DURACAO_ATAQUE: 18,  // duração total do golpe em quadros
+    podeAtacar: true,    // evita ataque contínuo segurando o botão
+
+    // Hitbox do ataque (calculada durante o golpe)
+    hitbox: null,
+
+    // Animação de caminhada (contador para alternar a "perna")
+    tempoAnim: 0
+  };
+
+  // ----------------------------------------------------------------
+  // 5. ENTRADA: estado das ações (compartilhado por teclado e toque)
+  // ----------------------------------------------------------------
+  const teclas = {
+    esquerda: false,
+    direita: false,
+    pular: false,
+    atacar: false
+  };
+
+  // --- TECLADO (para testar no PC) ---
+  window.addEventListener("keydown", (e) => {
+    switch (e.code) {
+      case "ArrowLeft":  case "KeyA": teclas.esquerda = true; break;
+      case "ArrowRight": case "KeyD": teclas.direita = true; break;
+      case "ArrowUp":    case "KeyZ": case "Space": teclas.pular = true; e.preventDefault(); break;
+      case "KeyX":       teclas.atacar = true; break;
+    }
+  });
+  window.addEventListener("keyup", (e) => {
+    switch (e.code) {
+      case "ArrowLeft":  case "KeyA": teclas.esquerda = false; break;
+      case "ArrowRight": case "KeyD": teclas.direita = false; break;
+      case "ArrowUp":    case "KeyZ": case "Space": teclas.pular = false; break;
+      case "KeyX":       teclas.atacar = false; jogador.podeAtacar = true; break;
+    }
+  });
+
+  // --- TOQUE (essencial no celular, com suporte a multitoque) ---
+  // Cada botão liga/desliga a tecla correspondente. Como usamos eventos
+  // por botão (touchstart/touchend) e cada botão é independente, o
+  // multitoque funciona naturalmente (mover + pular/atacar juntos).
+  function configurarBotao(id, acao) {
+    const el = document.getElementById(id);
+
+    // Toque iniciado: ativa a ação
+    const pressionar = (e) => {
+      e.preventDefault();
+      teclas[acao] = true;
+      el.classList.add("ativo");
+    };
+    // Toque encerrado/cancelado: desativa a ação
+    const soltar = (e) => {
+      e.preventDefault();
+      teclas[acao] = false;
+      el.classList.remove("ativo");
+      if (acao === "atacar") jogador.podeAtacar = true; // libera próximo golpe
+    };
+
+    el.addEventListener("touchstart", pressionar, { passive: false });
+    el.addEventListener("touchend", soltar, { passive: false });
+    el.addEventListener("touchcancel", soltar, { passive: false });
+
+    // Suporte a mouse também (caso teste no PC clicando)
+    el.addEventListener("mousedown", pressionar);
+    el.addEventListener("mouseup", soltar);
+    el.addEventListener("mouseleave", soltar);
+  }
+  configurarBotao("btnEsquerda", "esquerda");
+  configurarBotao("btnDireita", "direita");
+  configurarBotao("btnPular", "pular");
+  configurarBotao("btnAtacar", "atacar");
+
+  // Bloqueia gestos de zoom/scroll que escapem dos botões
+  document.addEventListener("touchmove", (e) => e.preventDefault(), { passive: false });
+  document.addEventListener("gesturestart", (e) => e.preventDefault());
+  // Evita o "double-tap zoom" do iOS
+  let ultimoToque = 0;
+  document.addEventListener("touchend", (e) => {
+    const agora = Date.now();
+    if (agora - ultimoToque < 300) e.preventDefault();
+    ultimoToque = agora;
+  }, { passive: false });
+
+  // ----------------------------------------------------------------
+  // FUNÇÃO AUXILIAR: colisão entre dois retângulos (AABB)
+  // ----------------------------------------------------------------
+  function colide(a, b) {
+    return a.x < b.x + b.largura &&
+           a.x + a.largura > b.x &&
+           a.y < b.y + b.altura &&
+           a.y + a.altura > b.y;
+  }
+
+  // ----------------------------------------------------------------
+  // 6. ATUALIZAÇÃO DA LÓGICA (UPDATE)
+  // ----------------------------------------------------------------
+  function update() {
+    // --- Movimento horizontal a partir da entrada ---
+    if (teclas.esquerda && !teclas.direita) {
+      jogador.velX = -VELOCIDADE_ANDAR;
+      jogador.direcao = -1;
+    } else if (teclas.direita && !teclas.esquerda) {
+      jogador.velX = VELOCIDADE_ANDAR;
+      jogador.direcao = 1;
+    } else {
+      // Sem direção: aplica atrito até parar
+      jogador.velX *= ATRITO;
+      if (Math.abs(jogador.velX) < 0.1) jogador.velX = 0;
+    }
+
+    // --- Pulo (só quando está no chão) ---
+    if (teclas.pular && jogador.noChao) {
+      jogador.velY = -FORCA_PULO;
+      jogador.noChao = false;
+    }
+
+    // --- Início do ataque ---
+    // Só dispara uma vez por toque (podeAtacar evita repetição segurando)
+    if (teclas.atacar && jogador.podeAtacar && !jogador.atacando) {
+      jogador.atacando = true;
+      jogador.tempoAtaque = jogador.DURACAO_ATAQUE;
+      jogador.podeAtacar = false;
+    }
+
+    // --- Gravidade ---
+    jogador.velY += GRAVIDADE;
+    if (jogador.velY > 14) jogador.velY = 14; // limite de queda
+
+    // --- Movimento + colisão no eixo X ---
+    jogador.x += jogador.velX;
+    for (const s of solidos) {
+      if (colide(jogador, s)) {
+        if (jogador.velX > 0) {
+          jogador.x = s.x - jogador.largura; // bateu pela direita
+        } else if (jogador.velX < 0) {
+          jogador.x = s.x + s.largura;       // bateu pela esquerda
+        }
+        jogador.velX = 0;
+      }
+    }
+
+    // --- Movimento + colisão no eixo Y ---
+    jogador.noChao = false;
+    jogador.y += jogador.velY;
+    for (const s of solidos) {
+      if (colide(jogador, s)) {
+        if (jogador.velY > 0) {
+          // Caindo: pousa em cima do sólido
+          jogador.y = s.y - jogador.altura;
+          jogador.velY = 0;
+          jogador.noChao = true;
+        } else if (jogador.velY < 0) {
+          // Subindo: bate a cabeça no sólido
+          jogador.y = s.y + s.altura;
+          jogador.velY = 0;
+        }
+      }
+    }
+
+    // --- Limites laterais da tela (não sai do mundo) ---
+    if (jogador.x < 0) jogador.x = 0;
+    if (jogador.x + jogador.largura > LARGURA_VIRTUAL) {
+      jogador.x = LARGURA_VIRTUAL - jogador.largura;
+    }
+    // Se cair para fora, reaparece no topo (respawn simples)
+    if (jogador.y > ALTURA_VIRTUAL + 50) {
+      jogador.x = 40; jogador.y = 100; jogador.velY = 0;
+    }
+
+    // --- Atualiza o estado do ataque e calcula a hitbox ---
+    if (jogador.atacando) {
+      jogador.tempoAtaque--;
+
+      // Hitbox ativa na frente do jogador (na metade da animação)
+      const larguraGolpe = 16;
+      jogador.hitbox = {
+        x: jogador.direcao === 1
+            ? jogador.x + jogador.largura
+            : jogador.x - larguraGolpe,
+        y: jogador.y + 4,
+        largura: larguraGolpe,
+        altura: jogador.altura - 8
+      };
+
+      if (jogador.tempoAtaque <= 0) {
+        jogador.atacando = false;
+        jogador.hitbox = null;
+      }
+    }
+
+    // --- Define o estado visual (prioridade: atacar > pular > andar > parado) ---
+    if (jogador.atacando) {
+      jogador.estado = "atacando";
+    } else if (!jogador.noChao) {
+      jogador.estado = "pulando";
+    } else if (Math.abs(jogador.velX) > 0.2) {
+      jogador.estado = "andando";
+      jogador.tempoAnim++;
+    } else {
+      jogador.estado = "parado";
+    }
+  }
+
+  // ----------------------------------------------------------------
+  // 7. DESENHO (RENDER) - tudo com retângulos coloridos (placeholder)
+  // ----------------------------------------------------------------
+  function render() {
+    // --- Fundo: gradiente azul-escuro -> vermelho-escuro (clima pós-apocalíptico) ---
+    const grad = ctx.createLinearGradient(0, 0, 0, ALTURA_VIRTUAL);
+    grad.addColorStop(0, CORES.ceuTopo);
+    grad.addColorStop(1, CORES.ceuBaixo);
+    ctx.fillStyle = grad;
+    ctx.fillRect(0, 0, LARGURA_VIRTUAL, ALTURA_VIRTUAL);
+
+    // --- Lua avermelhada ---
+    ctx.fillStyle = CORES.lua;
+    ctx.beginPath();
+    ctx.arc(390, 55, 26, 0, Math.PI * 2);
+    ctx.fill();
+    // Sombra interna da lua (recorte) para dar aspecto de crescente
+    ctx.fillStyle = CORES.ceuTopo;
+    ctx.beginPath();
+    ctx.arc(400, 48, 22, 0, Math.PI * 2);
+    ctx.fill();
+
+    // --- Silhuetas de montanhas/ruínas ao fundo (parallax estático) ---
+    desenharRuinas();
+
+    // --- Plataformas ---
+    for (const p of plataformas) {
+      ctx.fillStyle = CORES.plataforma;
+      ctx.fillRect(p.x, p.y, p.largura, p.altura);
+      ctx.fillStyle = CORES.platTopo;            // borda superior iluminada
+      ctx.fillRect(p.x, p.y, p.largura, 3);
+    }
+
+    // --- Chão ---
+    ctx.fillStyle = CORES.chao;
+    ctx.fillRect(chao.x, chao.y, chao.largura, chao.altura);
+    ctx.fillStyle = CORES.chaoTopo;              // borda superior do chão
+    ctx.fillRect(chao.x, chao.y, chao.largura, 4);
+    // Textura simples do chão: tracinhos verticais
+    ctx.fillStyle = "rgba(0,0,0,0.2)";
+    for (let i = 0; i < LARGURA_VIRTUAL; i += 16) {
+      ctx.fillRect(i, chao.y + 8, 2, chao.altura - 8);
+    }
+
+    // --- Jogador ---
+    desenharJogador();
+
+    // --- Hitbox do ataque (brilho na frente) ---
+    if (jogador.atacando && jogador.hitbox) {
+      // Quanto mais novo o golpe, mais forte o brilho
+      const alpha = jogador.tempoAtaque / jogador.DURACAO_ATAQUE;
+      ctx.fillStyle = "rgba(230, 200, 120," + (0.4 + alpha * 0.5) + ")";
+      ctx.fillRect(jogador.hitbox.x, jogador.hitbox.y,
+                   jogador.hitbox.largura, jogador.hitbox.altura);
+      // Risco central do golpe
+      ctx.fillStyle = "rgba(255, 240, 200, 0.9)";
+      ctx.fillRect(jogador.hitbox.x, jogador.hitbox.y + jogador.hitbox.altura / 2 - 1,
+                   jogador.hitbox.largura, 2);
+    }
+  }
+
+  // Desenha silhuetas de ruínas no horizonte (retângulos escuros)
+  function desenharRuinas() {
+    ctx.fillStyle = CORES.montanhas;
+    // Montanhas suaves
+    ctx.beginPath();
+    ctx.moveTo(0, 200);
+    ctx.lineTo(80, 150);
+    ctx.lineTo(160, 195);
+    ctx.lineTo(260, 145);
+    ctx.lineTo(360, 190);
+    ctx.lineTo(480, 160);
+    ctx.lineTo(480, ALTURA_VIRTUAL);
+    ctx.lineTo(0, ALTURA_VIRTUAL);
+    ctx.closePath();
+    ctx.fill();
+
+    // Prédios em ruínas (retângulos de alturas variadas)
+    ctx.fillStyle = CORES.ruinas;
+    const predios = [
+      [20, 170], [40, 150], [70, 185], [120, 160],
+      [250, 175], [280, 155], [430, 180], [455, 165]
+    ];
+    for (const [px, py] of predios) {
+      ctx.fillRect(px, py, 18, ALTURA_VIRTUAL - py);
+      // Janelas (pontinhos)
+      ctx.fillStyle = "rgba(200, 120, 90, 0.25)";
+      for (let wy = py + 6; wy < ALTURA_VIRTUAL - 10; wy += 12) {
+        ctx.fillRect(px + 4, wy, 3, 4);
+        ctx.fillRect(px + 11, wy, 3, 4);
+      }
+      ctx.fillStyle = CORES.ruinas;
+    }
+  }
+
+  // ----------------------------------------------------------------
+  // Desenho do jogador conforme o estado e a direção.
+  // [SPRITE] Substitua este bloco por ctx.drawImage(...) no futuro.
+  //   - jogador.estado: "parado" | "andando" | "pulando" | "atacando"
+  //   - jogador.direcao: 1 (direita) ou -1 (esquerda)
+  //   - jogador.tempoAnim: contador para alternar quadros de caminhada
+  // ----------------------------------------------------------------
+  function desenharJogador() {
+    const x = Math.round(jogador.x);
+    const y = Math.round(jogador.y);
+    const L = jogador.largura;
+    const A = jogador.altura;
+
+    // Sombra no chão (oval simples)
+    ctx.fillStyle = "rgba(0,0,0,0.25)";
+    ctx.beginPath();
+    ctx.ellipse(x + L / 2, y + A, L / 1.5, 4, 0, 0, Math.PI * 2);
+    ctx.fill();
+
+    // --- Corpo (tronco) - vermelho ---
+    ctx.fillStyle = CORES.jogador;
+    ctx.fillRect(x, y + 8, L, A - 12);
+
+    // --- Detalhe da roupa (faixa azul no peito) ---
+    ctx.fillStyle = CORES.jogadorAzul;
+    ctx.fillRect(x, y + 12, L, 4);
+
+    // --- Cabeça ---
+    ctx.fillStyle = CORES.jogadorPele;
+    ctx.fillRect(x + 3, y, L - 6, 10);
+
+    // --- Olho (indica a direção que o personagem olha) ---
+    ctx.fillStyle = "#1a1020";
+    if (jogador.direcao === 1) {
+      ctx.fillRect(x + L - 7, y + 3, 3, 3);
+    } else {
+      ctx.fillRect(x + 4, y + 3, 3, 3);
+    }
+
+    // --- Pernas: animação de caminhada alternando a posição ---
+    ctx.fillStyle = CORES.jogadorAzul;
+    if (jogador.estado === "andando") {
+      // Alterna entre dois quadros a cada ~8 frames
+      const passo = Math.floor(jogador.tempoAnim / 6) % 2 === 0;
+      if (passo) {
+        ctx.fillRect(x + 2, y + A - 4, 6, 4);
+        ctx.fillRect(x + L - 8, y + A - 6, 6, 6);
+      } else {
+        ctx.fillRect(x + 2, y + A - 6, 6, 6);
+        ctx.fillRect(x + L - 8, y + A - 4, 6, 4);
+      }
+    } else if (jogador.estado === "pulando") {
+      // Pernas recolhidas no pulo
+      ctx.fillRect(x + 2, y + A - 6, 6, 5);
+      ctx.fillRect(x + L - 8, y + A - 6, 6, 5);
+    } else {
+      // Parado/atacando: pernas paradas
+      ctx.fillRect(x + 2, y + A - 5, 6, 5);
+      ctx.fillRect(x + L - 8, y + A - 5, 6, 5);
+    }
+
+    // --- Braço de ataque (estende para a frente durante o golpe) ---
+    if (jogador.estado === "atacando") {
+      ctx.fillStyle = CORES.jogadorPele;
+      const bracoX = jogador.direcao === 1 ? x + L : x - 8;
+      ctx.fillRect(bracoX, y + 12, 8, 5);
+      // "arma"/punho na ponta
+      ctx.fillStyle = "#e8e0c0";
+      const armaX = jogador.direcao === 1 ? x + L + 6 : x - 10;
+      ctx.fillRect(armaX, y + 11, 4, 7);
+    } else {
+      // Braço normal junto ao corpo
+      ctx.fillStyle = CORES.jogadorPele;
+      const bracoX = jogador.direcao === 1 ? x + L - 4 : x;
+      ctx.fillRect(bracoX, y + 14, 4, 7);
+    }
+  }
+
+  // ----------------------------------------------------------------
+  // 8. GAME LOOP (requestAnimationFrame)
+  // ----------------------------------------------------------------
+  function loop() {
+    update();   // atualiza lógica/física
+    render();   // desenha o quadro
+    requestAnimationFrame(loop);
+  }
+  requestAnimationFrame(loop);
+
+  // Esconde o texto de ajuda após 6 segundos
+  setTimeout(() => {
+    const ajuda = document.getElementById("ajuda");
+    if (ajuda) ajuda.style.opacity = "0";
+  }, 6000);
+</script>
+</body>
+</html>
